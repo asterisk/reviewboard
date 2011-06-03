@@ -12,6 +12,7 @@ from reviewboard.reviews.signals import review_request_published, \
                                         review_published, reply_published
 from reviewboard.reviews.views import build_diff_comment_fragments
 
+SUBJECT_PREFIX = "[Code Review]"
 
 def review_request_published_cb(sender, user, review_request, changedesc,
                                 **kwargs):
@@ -120,7 +121,9 @@ def send_review_mail(user, review_request, subject, in_reply_to,
     """
     current_site = Site.objects.get_current()
 
-    from_email = get_email_address_for_user(user)
+    # from_email = get_email_address_for_user(user)
+    from_email = u'"%s" <reviewboard@asterisk.org>' % (user.get_full_name()
+                                                       or user.username)
 
     recipients = set([from_email])
     to_field = set()
@@ -234,7 +237,7 @@ def mail_review_request(user, review_request, changedesc=None):
     if not review_request.public or review_request.status == 'D':
         return
 
-    subject = u"Review Request: %s" % review_request.summary
+    subject = u"%s %s" % (SUBJECT_PREFIX, review_request.summary)
     reply_message_id = None
 
     if review_request.email_message_id:
@@ -284,7 +287,7 @@ def mail_review(user, review):
     review.email_message_id = \
         send_review_mail(user,
                          review_request,
-                         u"Re: Review Request: %s" % review_request.summary,
+                         u"Re: %s %s" % (SUBJECT_PREFIX, review_request.summary),
                          review_request.email_message_id,
                          None,
                          'notifications/review_email.txt',
@@ -319,7 +322,7 @@ def mail_reply(user, reply):
     reply.email_message_id = \
         send_review_mail(user,
                          review_request,
-                         u"Re: Review Request: %s" % review_request.summary,
+                         u"Re: %s %s" % (SUBJECT_PREFIX, review_request.summary),
                          review.email_message_id,
                          harvest_people_from_review(review),
                          'notifications/reply_email.txt',
