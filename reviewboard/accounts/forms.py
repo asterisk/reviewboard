@@ -115,9 +115,9 @@ class RegistrationForm(DjbletsRegistrationForm):
         siteconfig = SiteConfiguration.objects.get_current()
 
         if siteconfig.get('site_domain_method') == 'https':
-            self.recaptcha_url = 'https://api-secure.recaptcha.net'
+            self.recaptcha_url = 'https://www.google.com/recaptcha/api'
         else:
-            self.recaptcha_url = 'http://api.recaptcha.net'
+            self.recaptcha_url = 'http://www.google.com/recaptcha/api'
 
     def clean(self):
         siteconfig = SiteConfiguration.objects.get_current()
@@ -183,8 +183,9 @@ class ActiveDirectorySettingsForm(SiteSettingsForm):
 
     auth_ad_domain_controller = forms.CharField(
         label=_("Domain controller"),
-        help_text=_("If not using DNS to find the DC specify the domain "
-                    "controller here"),
+        help_text=_("If not using DNS to find the DC, specify the domain "
+                    "controller(s) here "
+                    "(eg. ctrl1.example.com ctrl2.example.com:389)"),
         required=False,
         widget=forms.TextInput(attrs={'size': '40'}))
 

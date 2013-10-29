@@ -47,6 +47,7 @@ from reviewboard.admin.checks import get_can_enable_search, \
                                      get_can_use_amazon_s3, \
                                      get_can_use_couchdb
 from reviewboard.admin.siteconfig import load_site_config
+from reviewboard.admin.support import get_install_key
 from reviewboard.ssh.client import SSHClient
 
 
@@ -457,9 +458,9 @@ class EMailSettingsForm(SiteSettingsForm):
     mail_host_user = forms.CharField(
         label=_("Username"),
         required=False,
-        widget=forms.TextInput(attrs={'size': '30'}))
+        widget=forms.TextInput(attrs={'size': '30', 'autocomplete': 'off'}))
     mail_host_password = forms.CharField(
-        widget=forms.PasswordInput(attrs={'size': '30'}),
+        widget=forms.PasswordInput(attrs={'size': '30', 'autocomplete': 'off'}),
         label=_("Password"),
         required=False)
     mail_use_tls = forms.BooleanField(
@@ -667,12 +668,16 @@ class LoggingSettingsForm(SiteSettingsForm):
 
 
 class SSHSettingsForm(forms.Form):
+    """SSH key settings for Review Board."""
     generate_key = forms.BooleanField(required=False,
                                       initial=True,
                                       widget=forms.HiddenInput)
     keyfile = forms.FileField(label=_('Key file'),
                               required=False,
                               widget=forms.FileInput(attrs={'size': '35'}))
+    delete_key = forms.BooleanField(required=False,
+                                    initial=True,
+                                    widget=forms.HiddenInput)
 
     def create(self, files):
         if self.cleaned_data['generate_key']:
@@ -699,6 +704,21 @@ class SSHSettingsForm(forms.Form):
             except Exception, e:
                 self.errors['keyfile'] = forms.util.ErrorList([
                     _('Error uploading SSH key: %s') % e
+                ])
+                raise
+
+    def did_request_delete(self):
+        """Return whether the user has requested to delete the user SSH key"""
+        return 'delete_key' in self.cleaned_data
+
+    def delete(self):
+        """Try to delete the user SSH key upon request"""
+        if self.cleaned_data['delete_key']:
+            try:
+                SSHClient().delete_user_key()
+            except Exception, e:
+                self.errors['delete_key'] = forms.util.ErrorList([
+                    _('Unable to delete SSH key file: %s') % e
                 ])
                 raise
 
@@ -838,3 +858,45 @@ class StorageSettingsForm(SiteSettingsForm):
                 'fields':  ('couchdb_default_server',),
             },
         )
+
+
+class SupportSettingsForm(SiteSettingsForm):
+    """Support settings for Review Board."""
+    install_key = forms.CharField(
+        label=_('Install key'),
+        help_text=_('The installation key to provide when purchasing a '
+                    'support contract.'),
+        required=False,
+        widget=forms.TextInput(attrs={
+            'size': '80',
+            'disabled': 'disabled'
+        }))
+
+    support_url = forms.CharField(
+        label=_('Custom Support URL'),
+        help_text=_("The location of your organization's own Review Board "
+                    "support page. Leave blank to use the default support "
+                    "page."),
+        required=False,
+        widget=forms.TextInput(attrs={'size': '80'}))
+
+    def load(self):
+        super(SupportSettingsForm, self).load()
+        self.fields['install_key'].initial = get_install_key()
+
+    class Meta:
+        title = _('Support Settings')
+        save_blacklist = ('install_key',)
+        fieldsets = ({
+            'classes': ('wide',),
+            'description':
+                '<p>For fast one-on-one support, plus other benefits, '
+                'purchase a <a href="'
+                'http://www.beanbaginc.com/support/contracts/">'
+                'support contract</a>.</p>'
+                '<p>You can also customize where your users will go for '
+                'support by changing the Custom Support URL below. If '
+                'left blank, they will be taken to our support '
+                'channel.</p>',
+            'fields': ('install_key', 'support_url'),
+        },)

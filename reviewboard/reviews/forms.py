@@ -6,6 +6,7 @@ from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.utils.translation import ugettext as _
 
 from reviewboard.diffviewer import forms as diffviewer_forms
+from reviewboard.diffviewer.errors import EmptyDiffError
 from reviewboard.diffviewer.models import DiffSet
 from reviewboard.reviews.errors import OwnershipError
 from reviewboard.reviews.models import DefaultReviewer, Group, ReviewRequest, \
@@ -127,8 +128,10 @@ class NewReviewRequestForm(forms.Form):
 
     field_mapping = {}
 
-    def __init__(self, user, local_site, *args, **kwargs):
+    def __init__(self, request, user, local_site, *args, **kwargs):
         super(NewReviewRequestForm, self).__init__(*args, **kwargs)
+
+        self.request = request
 
         # Repository ID : visible fields mapping.  This is so we can
         # dynamically show/hide the relevant fields with javascript.
@@ -232,6 +235,7 @@ class NewReviewRequestForm(forms.Form):
         if diff_file:
             diff_form = UploadDiffForm(
                 review_request,
+                request=self.request,
                 data={
                     'basedir': self.cleaned_data['basedir'],
                 },
@@ -259,7 +263,7 @@ class NewReviewRequestForm(forms.Form):
             except SavedError:
                 review_request.delete()
                 raise
-            except diffviewer_forms.EmptyDiffError:
+            except EmptyDiffError:
                 review_request.delete()
                 self.errors['diff_path'] = forms.util.ErrorList([
                     'The selected file does not appear to be a diff.'])

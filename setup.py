@@ -35,6 +35,10 @@ if sys.hexversion < 0x02050000:
                      'upgrade\n')
     sys.stderr.write('Python to a newer 2.x version (preferably 2.7).\n')
     sys.exit(1)
+elif sys.hexversion < 0x02060000:
+    markdown_requirement = 'markdown==2.2.1'
+else:
+    markdown_requirement = 'markdown>=2.2.1'
 
 
 # Make sure we're actually in the directory containing setup.py.
@@ -87,7 +91,8 @@ class BuildMedia(Command):
         pass
 
     def run(self):
-        retcode = subprocess.call(['./contrib/internal/build-media.py'])
+        retcode = subprocess.call([
+            sys.executable, './contrib/internal/build-media.py'])
 
         if retcode != 0:
             raise RuntimeError('Failed to build media files')
@@ -131,6 +136,7 @@ setup(name=PACKAGE_NAME,
               'rbssh = reviewboard.cmdline.rbssh:main',
           ],
           'reviewboard.hosting_services': [
+              'beanstalk = reviewboard.hostingsvcs.beanstalk:Beanstalk',
               'bitbucket = reviewboard.hostingsvcs.bitbucket:Bitbucket',
               'bugzilla = reviewboard.hostingsvcs.bugzilla:Bugzilla',
               'codebasehq = reviewboard.hostingsvcs.codebasehq:CodebaseHQ',
@@ -163,12 +169,12 @@ setup(name=PACKAGE_NAME,
       },
       cmdclass=cmdclasses,
       install_requires=[
-          'Django>=1.4.5,<1.5',
-          'django_evolution>=0.6.7',
-          'Djblets>=0.7.11,<0.8',
+          'Django>=1.4.8,<1.5',
+          'django_evolution>=0.6.9',
+          'Djblets>=0.7.21,<0.8',
           'django-pipeline>=1.2.24,<1.3',
           'docutils',
-          'markdown>=2.2.1',
+          markdown_requirement,
           'mimeparse>=0.1.3',
           'paramiko>=1.9.0',
           'Pygments>=1.5',

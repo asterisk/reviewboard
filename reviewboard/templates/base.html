@@ -70,15 +70,15 @@
 {% include "base/branding.html" %}
     <ul id="accountnav">
      <li>
-      <a href="#">Support</a>
+      <a href="#">{% trans "Support" %} &#9662;</a>
       <ul>
        <li><a href="http://www.reviewboard.org/docs/manual/1.7/">{% trans "Documentation" %}</a></li>
-       <li><a href="http://support.beanbaginc.com/">{% trans "Get Support" %}</a></li>
+       <li><a href="{% url support %}">{% trans "Get Support" %}</a></li>
       </ul>
      </li>
 {% if user.is_authenticated %}
      <li>
-      <a class="user-nav-item" href="{% url user-preferences %}">{% gravatar user 32 %} {{user.first_name}}</a>
+      <a class="user-nav-item" href="{% url user-preferences %}">{% gravatar user 32 %} {{user.first_name}} &#9662;</a>
       <ul>
        <li><a href="{% url user-preferences %}">{% trans "My account" %}</a></li>
 {%  if user.is_staff %}
@@ -95,6 +95,8 @@
      <li><a href="{% url register %}">{% trans "Register" %}</a></li>
 {%  endif %}
 {% endif %}{# !is_authenticated #}
+{% header_action_hooks %}
+{% header_dropdown_action_hooks %}
     </ul>
     <div id="search">
 {% if siteconfig.settings.search_enable %}

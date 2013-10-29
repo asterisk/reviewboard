@@ -9,6 +9,7 @@ from reviewboard.site.models import LocalSite
 
 class HostingServiceAccount(models.Model):
     service_name = models.CharField(max_length=128)
+    hosting_url = models.CharField(max_length=255, blank=True, null=True)
     username = models.CharField(max_length=128)
     data = JSONField()
     visible = models.BooleanField(default=True)
@@ -61,6 +62,3 @@ class HostingServiceAccount(models.Model):
         """
         return (user.has_perm('hostingsvcs.change_hostingserviceaccount') or
                 (self.local_site and self.local_site.is_mutable_by(user)))
-
-    class Meta:
-        unique_together = ('service_name', 'username', 'local_site')

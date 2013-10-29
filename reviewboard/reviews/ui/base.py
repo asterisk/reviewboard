@@ -9,7 +9,9 @@ import mimeparse
 
 from reviewboard.attachments.mimetypes import score_match
 from reviewboard.diffviewer.models import DiffSet
+from reviewboard.reviews.context import make_review_request_context
 from reviewboard.reviews.models import FileAttachmentComment
+from reviewboard.site.urlresolvers import local_site_reverse
 
 
 _file_attachment_review_uis = []
@@ -46,18 +48,22 @@ class ReviewUI(object):
 
         return render_to_response(
             self.template_name,
-            RequestContext(request, {
-                'base_template': base_template_name,
-                'caption': self.get_caption(draft),
-                'comments': self.get_comments(),
-                'draft': draft,
-                'has_diffs': (draft and draft.diffset) or diffset_count > 0,
-                'review_request_details': review_request_details,
-                'review_request': self.review_request,
-                'review': review,
-                'review_ui': self,
-                self.object_key: self.obj,
-            }, **self.get_extra_context(request)))
+            RequestContext(
+                request,
+                make_review_request_context(request, self.review_request, {
+                    'base_template': base_template_name,
+                    'caption': self.get_caption(draft),
+                    'comments': self.get_comments(),
+                    'draft': draft,
+                    'has_diffs': (draft and draft.diffset) or
+                                 diffset_count > 0,
+                    'review_request_details': review_request_details,
+                    'review_request': self.review_request,
+                    'review': review,
+                    'review_ui': self,
+                    self.object_key: self.obj,
+                }),
+                **self.get_extra_context(request)))
 
     def get_comments(self):
         return self.obj.get_comments()
@@ -76,6 +82,31 @@ class ReviewUI(object):
         None in order to use the fallback.
         """
         return None
+
+    def get_comment_link_url(self, comment):
+        """Returns the link for a comment.
+
+        This will normally just link to the review UI itself, but some may want
+        to specialize the URL to link to a specific location within the
+        file."""
+        local_site_name = None
+        if self.review_request.local_site:
+            local_site_name = self.review_request.local_site.name
+
+        return local_site_reverse(
+            'file_attachment',
+            local_site_name=local_site_name,
+            kwargs={
+                'review_request_id': self.review_request.display_id,
+                'file_attachment_id': self.obj.pk,
+            })
+
+    def get_comment_link_text(self, comment):
+        """Returns the text to link to a comment.
+
+        This will normally just return the filename, but some may want to
+        specialize to list things like page numbers or sections."""
+        return self.obj.filename
 
     def get_extra_context(self, request):
         return {}
@@ -97,10 +128,13 @@ class ReviewUI(object):
         representations, such as comments grouped by an identifier or region.
         These representations must be serializable into JSON.
         """
-        return [
-            self.serialize_comment(comment)
-            for comment in comments
-        ]
+        user = self.request.user
+
+        for comment in comments:
+            review = comment.get_review()
+
+            if review and (review.public or review.user == user):
+                yield self.serialize_comment(comment)
 
     def serialize_comment(self, comment):
         """Serializes a comment.

@@ -31,7 +31,6 @@ from djblets.util.misc import get_object_or_none
 from reviewboard.accounts.decorators import check_login_required, \
                                             valid_prefs_required
 from reviewboard.accounts.models import ReviewRequestVisit, Profile
-from reviewboard.attachments.forms import UploadFileForm, CommentFileForm
 from reviewboard.attachments.models import FileAttachment
 from reviewboard.changedescs.models import ChangeDescription
 from reviewboard.diffviewer.diffutils import get_file_chunks_in_range
@@ -41,15 +40,15 @@ from reviewboard.diffviewer.views import view_diff, view_diff_fragment, \
 from reviewboard.extensions.hooks import DashboardHook, \
                                          ReviewRequestDetailHook
 from reviewboard.reviews.ui.screenshot import LegacyScreenshotReviewUI
+from reviewboard.reviews.context import make_review_request_context
 from reviewboard.reviews.datagrids import DashboardDataGrid, \
                                           GroupDataGrid, \
                                           ReviewRequestDataGrid, \
                                           SubmitterDataGrid, \
-                                          WatchedGroupDataGrid
+                                          WatchedGroupDataGrid, \
+                                          get_sidebar_counts
 from reviewboard.reviews.errors import OwnershipError
-from reviewboard.reviews.forms import NewReviewRequestForm, \
-                                      UploadDiffForm, \
-                                      UploadScreenshotForm
+from reviewboard.reviews.forms import NewReviewRequestForm
 from reviewboard.reviews.models import Comment, \
                                        FileAttachmentComment, \
                                        Group, ReviewRequest, Review, \
@@ -109,32 +108,6 @@ def _find_review_request(request, review_request_id, local_site_name):
         return review_request, None
     else:
         return None, _render_permission_denied(request)
-
-
-def _make_review_request_context(review_request, extra_context):
-    """Returns a dictionary for template contexts used for review requests.
-
-    The dictionary will contain the common data that is used for all
-    review request-related pages (the review request detail page, the diff
-    viewer, and the screenshot pages).
-
-    For convenience, extra data can be passed to this dictionary.
-    """
-    if review_request.repository:
-        upload_diff_form = UploadDiffForm(review_request)
-        scmtool = review_request.repository.get_scmtool()
-    else:
-        upload_diff_form = None
-        scmtool = None
-
-    return dict({
-        'review_request': review_request,
-        'upload_diff_form': upload_diff_form,
-        'upload_screenshot_form': UploadScreenshotForm(),
-        'file_attachment_form': UploadFileForm(),
-        'comment_file_form': CommentFileForm(),
-        'scmtool': scmtool,
-    }, **extra_context)
 
 
 def _build_id_map(objects):
@@ -231,6 +204,7 @@ fields_changed_name_map = {
     'description': _('Description'),
     'testing_done': _('Testing Done'),
     'bugs_closed': _('Bugs Closed'),
+    'depends_on': _('Depends On'),
     'branch': _('Branch'),
     'target_groups': _('Reviewers (Groups)'),
     'target_people': _('Reviewers (People)'),
@@ -263,7 +237,7 @@ def new_review_request(request,
         local_site = None
 
     if request.method == 'POST':
-        form = NewReviewRequestForm(request.user, local_site,
+        form = NewReviewRequestForm(request, request.user, local_site,
                                     request.POST, request.FILES)
 
         if form.is_valid():
@@ -277,7 +251,7 @@ def new_review_request(request,
             except (OwnershipError, SCMError, SSHError, ValueError):
                 pass
     else:
-        form = NewReviewRequestForm(request.user, local_site)
+        form = NewReviewRequestForm(request, request.user, local_site)
 
     return render_to_response(template_name, RequestContext(request, {
         'form': form,
@@ -709,24 +683,25 @@ def review_detail(request,
         if status in (ReviewRequest.DISCARDED, ReviewRequest.SUBMITTED):
             close_description = latest_changedesc.text
 
-    response = render_to_response(
-        template_name,
-        RequestContext(request, _make_review_request_context(review_request, {
-            'draft': draft,
-            'detail_hooks': ReviewRequestDetailHook.hooks,
-            'review_request_details': review_request_details,
-            'entries': entries,
-            'last_activity_time': last_activity_time,
-            'review': pending_review,
-            'request': request,
-            'latest_changedesc': latest_changedesc,
-            'close_description': close_description,
-            'PRE_CREATION': PRE_CREATION,
-            'issues': issues,
-            'has_diffs': (draft and draft.diffset) or len(diffsets) > 0,
-            'file_attachments': file_attachments,
-            'screenshots': screenshots,
-        })))
+    context_data = make_review_request_context(request, review_request, {
+        'draft': draft,
+        'detail_hooks': ReviewRequestDetailHook.hooks,
+        'review_request_details': review_request_details,
+        'entries': entries,
+        'last_activity_time': last_activity_time,
+        'review': pending_review,
+        'request': request,
+        'latest_changedesc': latest_changedesc,
+        'close_description': close_description,
+        'PRE_CREATION': PRE_CREATION,
+        'issues': issues,
+        'has_diffs': (draft and draft.diffset) or len(diffsets) > 0,
+        'file_attachments': file_attachments,
+        'screenshots': screenshots,
+    })
+
+    response = render_to_response(template_name,
+                                  RequestContext(request, context_data))
     set_etag(response, etag)
 
     return response
@@ -771,8 +746,9 @@ def all_review_requests(request,
             return _render_permission_denied(request)
     else:
         local_site = None
-    datagrid = ReviewRequestDataGrid(request,
-        ReviewRequest.objects.public(request.user,
+    datagrid = ReviewRequestDataGrid(
+        request,
+        ReviewRequest.objects.public(user=request.user,
                                      status=None,
                                      local_site=local_site,
                                      with_counts=True),
@@ -835,6 +811,7 @@ def dashboard(request,
         * 'mine'
     """
     view = request.GET.get('view', None)
+    context = {}
 
     if local_site_name:
         local_site = get_object_or_404(LocalSite, name=local_site_name)
@@ -850,9 +827,13 @@ def dashboard(request,
     else:
         grid = DashboardDataGrid(request, local_site=local_site)
 
-    return grid.render_to_response(template_name, extra_context={
-        'sidebar_hooks': DashboardHook.hooks,
-    })
+    if not request.GET.get('gridonly', False):
+        context = {
+            'sidebar_counts': get_sidebar_counts(request.user, local_site),
+            'sidebar_hooks': DashboardHook.hooks,
+        }
+
+    return grid.render_to_response(template_name, extra_context=context)
 
 
 @check_login_required
@@ -942,13 +923,15 @@ def submitter(request,
     datagrid = ReviewRequestDataGrid(request,
         ReviewRequest.objects.from_user(username, status=None,
                                         with_counts=True,
-                                        local_site=local_site),
+                                        local_site=local_site,
+                                        filter_private=True),
         _("%s's review requests") % username,
         local_site=local_site)
 
     return datagrid.render_to_response(template_name, extra_context={
         'show_profile': user.is_profile_visible(request.user),
         'viewing_user': user,
+        'groups': user.review_groups.accessible(request.user),
     })
 
 
@@ -1030,7 +1013,7 @@ def diff(request,
 
     return view_diff(
          request, diffset, interdiffset, template_name=template_name,
-         extra_context=_make_review_request_context(review_request, {
+         extra_context=make_review_request_context(request, review_request, {
             'diffsets': diffsets,
             'latest_diffset': latest_diffset,
             'review': pending_review,

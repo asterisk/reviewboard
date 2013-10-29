@@ -2,7 +2,7 @@ import logging
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ObjectDoesNotExist
-from django.db import connections, router
+from django.db import connections, router, transaction
 from django.db.models import Manager, Q
 from django.db.models.query import QuerySet
 
@@ -145,6 +145,7 @@ class ReviewRequestManager(ConcurrencyManager):
                     'local_site_id': local_site.pk,
                     'id': review_request.pk,
             })
+            transaction.commit()
 
             review_request = ReviewRequest.objects.get(pk=review_request.pk)
 
@@ -227,8 +228,8 @@ class ReviewRequestManager(ConcurrencyManager):
         else:
             return Q(submitter__username=user_or_username)
 
-    def public(self, *args, **kwargs):
-        return self._query(*args, **kwargs)
+    def public(self, filter_private=True, *args, **kwargs):
+        return self._query(filter_private=filter_private, *args, **kwargs)
 
     def to_group(self, group_name, local_site, *args, **kwargs):
         return self._query(
@@ -257,10 +258,12 @@ class ReviewRequestManager(ConcurrencyManager):
             *args, **kwargs)
 
     def _query(self, user=None, status='P', with_counts=False,
-               extra_query=None, local_site=None):
+               extra_query=None, local_site=None, filter_private=False):
+        is_authenticated = (user is not None and user.is_authenticated())
+
         query = Q(public=True)
 
-        if user and user.is_authenticated():
+        if is_authenticated:
             query = query | Q(submitter=user)
 
         query = query & Q(submitter__is_active=True)
@@ -272,6 +275,24 @@ class ReviewRequestManager(ConcurrencyManager):
 
         if extra_query:
             query = query & extra_query
+
+        if filter_private and (not user or not user.is_superuser):
+            repo_query = (Q(repository=None) |
+                          Q(repository__public=True))
+            group_query = (Q(target_groups=None) |
+                           Q(target_groups__invite_only=False))
+
+            if is_authenticated:
+                repo_query = repo_query | (
+                    Q(repository__users=user) |
+                    Q(repository__review_groups__users=user))
+                group_query = group_query | Q(target_groups__users=user)
+
+                query = query & (Q(submitter=user) |
+                                 (repo_query &
+                                  (Q(target_people=user) | group_query)))
+            else:
+                query = query & repo_query & group_query
 
         query = self.filter(query).distinct()
 
@@ -286,6 +307,18 @@ class ReviewRequestManager(ConcurrencyManager):
             return user_or_username
         else:
             return User.objects.get(username=user_or_username)
+
+    def for_id(self, pk, local_site=None):
+        """Returns the review request matching the given ID and LocalSite.
+
+        If a LocalSite is provided, then the ID will be matched against the
+        displayed ID for the LocalSite, rather than the in-database ID.
+        """
+        if local_site is None:
+            return self.model.objects.get(pk=pk)
+        else:
+            return self.model.objects.get(Q(local_id=pk) &
+                                          Q(local_site=local_site))
 
 
 class ReviewManager(ConcurrencyManager):

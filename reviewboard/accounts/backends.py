@@ -38,7 +38,7 @@ class AuthBackend(object):
     def authenticate(self, username, password):
         raise NotImplementedError
 
-    def get_or_create_user(self, username):
+    def get_or_create_user(self, username, request):
         raise NotImplementedError
 
     def get_user(self, user_id):
@@ -95,8 +95,8 @@ class StandardAuthBackend(AuthBackend, ModelBackend):
     def authenticate(self, username, password):
         return ModelBackend.authenticate(self, username, password)
 
-    def get_or_create_user(self, username):
-        return ModelBackend.get_or_create_user(self, username)
+    def get_or_create_user(self, username, request):
+        return ModelBackend.get_or_create_user(self, username, request)
 
     def update_password(self, user, password):
         user.password = hashers.make_password(password)
@@ -118,7 +118,7 @@ class NISBackend(AuthBackend):
             new_crypted = crypt.crypt(password, original_crypted)
 
             if original_crypted == new_crypted:
-                return self.get_or_create_user(username, passwd)
+                return self.get_or_create_user(username, None, passwd)
         except nis.error:
             # FIXME I'm not sure under what situations this would fail (maybe if
             # their NIS server is down), but it'd be nice to inform the user.
@@ -126,7 +126,7 @@ class NISBackend(AuthBackend):
 
         return None
 
-    def get_or_create_user(self, username, passwd=None):
+    def get_or_create_user(self, username, request, passwd=None):
         import nis
 
         username = username.strip()
@@ -202,13 +202,18 @@ class LDAPBackend(AuthBackend):
                     ldapo.bind_s(search[0][0], password)
 
             else :
-                # Attempt to bind using the given uid and password. It may be
-                # that we really need a setting for how the DN in this is
-                # constructed; this way is correct for my system
-                userbinding=','.join([uid,settings.LDAP_BASE_DN])
+                # Bind anonymously to the server, then search for the user with
+                # the given base DN and uid. If the user is found, a fully
+                # qualified DN is returned. Authentication is then done with
+                # bind using this fully qualified DN.
+                ldapo.simple_bind_s()
+                search = ldapo.search_s(settings.LDAP_BASE_DN,
+                                        ldap.SCOPE_SUBTREE,
+                                        uid)
+                userbinding = search[0][0]
                 ldapo.bind_s(userbinding, password)
 
-            return self.get_or_create_user(username, ldapo)
+            return self.get_or_create_user(username, None, ldapo)
 
         except ImportError:
             pass
@@ -227,7 +232,7 @@ class LDAPBackend(AuthBackend):
 
         return None
 
-    def get_or_create_user(self, username, ldapo):
+    def get_or_create_user(self, username, request, ldapo):
         username = username.strip()
 
         try:
@@ -305,26 +310,30 @@ class ActiveDirectoryBackend(AuthBackend):
     def get_domain_name(self):
         return str(settings.AD_DOMAIN_NAME)
 
-    def get_ldap_search_root(self):
+    def get_ldap_search_root(self, userdomain=None):
         if getattr(settings, "AD_SEARCH_ROOT", None):
             root = [settings.AD_SEARCH_ROOT]
         else:
-            root = ['dc=%s' % x for x in self.get_domain_name().split('.')]
+            if userdomain is None:
+                userdomain = self.get_domain_name()
+
+            root = ['dc=%s' % x for x in userdomain.split('.')]
+
             if settings.AD_OU_NAME:
                 root = ['ou=%s' % settings.AD_OU_NAME] + root
 
         return ','.join(root)
 
-    def search_ad(self, con, filterstr):
+    def search_ad(self, con, filterstr, userdomain=None):
         import ldap
-        search_root = self.get_ldap_search_root()
+        search_root = self.get_ldap_search_root(userdomain)
         logging.debug('Search root ' + search_root)
         return con.search_s(search_root, scope=ldap.SCOPE_SUBTREE, filterstr=filterstr)
 
-    def find_domain_controllers_from_dns(self):
+    def find_domain_controllers_from_dns(self, userdomain=None):
         import DNS
         DNS.Base.DiscoverNameServers()
-        q = '_ldap._tcp.%s' % self.get_domain_name()
+        q = '_ldap._tcp.%s' % (userdomain or self.get_domain_name())
         req = DNS.Base.DnsRequest(q, qtype = 'SRV').req()
         return [x['data'][-2:] for x in req.answers]
 
@@ -365,12 +374,21 @@ class ActiveDirectoryBackend(AuthBackend):
 
         return seen
 
-    def get_ldap_connections(self):
+    def get_ldap_connections(self, userdomain=None):
         import ldap
         if settings.AD_FIND_DC_FROM_DNS:
-            dcs = self.find_domain_controllers_from_dns()
+            dcs = self.find_domain_controllers_from_dns(userdomain)
         else:
-            dcs = [('389', settings.AD_DOMAIN_CONTROLLER)]
+            dcs = []
+
+            for dc_entry in settings.AD_DOMAIN_CONTROLLER.split():
+                if ':' in dc_entry:
+                    host, port = dc_entry.split(':')
+                else:
+                    host = dc_entry
+                    port = '389'
+
+                dcs.append([port, host])
 
         for dc in dcs:
             port, host = dc
@@ -383,17 +401,33 @@ class ActiveDirectoryBackend(AuthBackend):
     def authenticate(self, username, password):
         import ldap
 
-        connections = self.get_ldap_connections()
         username = username.strip()
+
+        user_subdomain = ''
+
+        if '@' in username:
+            username, user_subdomain = username.split('@', 1)
+        elif '\\' in username:
+            user_subdomain, username = username.split('\\', 1)
+
+        userdomain = self.get_domain_name()
+
+        if user_subdomain:
+            userdomain = "%s.%s" % (user_subdomain, userdomain)
+
+        connections = self.get_ldap_connections(userdomain)
         required_group = settings.AD_GROUP_NAME
 
         for con in connections:
             try:
-                bind_username ='%s@%s' % (username, self.get_domain_name())
+                bind_username = '%s@%s' % (username, userdomain)
+                logging.debug("User %s is trying to log in "
+                              "via AD" % bind_username)
                 con.simple_bind_s(bind_username, password)
                 user_data = self.search_ad(
                     con,
-                    '(&(objectClass=user)(sAMAccountName=%s))' % username)
+                    '(&(objectClass=user)(sAMAccountName=%s))' % username,
+                    userdomain)
 
                 if not user_data:
                     return None
@@ -410,7 +444,7 @@ class ActiveDirectoryBackend(AuthBackend):
                         logging.warning("Active Directory: User %s is not in required group %s" % (username, required_group))
                         return None
 
-                return self.get_or_create_user(username, user_data)
+                return self.get_or_create_user(username, None, user_data)
             except ldap.SERVER_DOWN:
                 logging.warning('Active Directory: Domain controller is down')
                 continue
@@ -421,7 +455,7 @@ class ActiveDirectoryBackend(AuthBackend):
         logging.error('Active Directory error: Could not contact any domain controller servers')
         return None
 
-    def get_or_create_user(self, username, ad_user_data):
+    def get_or_create_user(self, username, request, ad_user_data):
         username = username.strip()
 
         try:
@@ -462,7 +496,7 @@ class X509Backend(AuthBackend):
 
     def authenticate(self, x509_field=""):
         username = self.clean_username(x509_field)
-        return self.get_or_create_user(username)
+        return self.get_or_create_user(username, None)
 
     def clean_username(self, username):
         username = username.strip()
@@ -480,7 +514,7 @@ class X509Backend(AuthBackend):
 
         return username
 
-    def get_or_create_user(self, username):
+    def get_or_create_user(self, username, request):
         user = None
         username = username.strip()
 

@@ -522,6 +522,11 @@ class ReviewRequest(BaseReviewRequestDetails):
         related_name="review_request",
         blank=True)
 
+    depends_on = models.ManyToManyField('ReviewRequest',
+                                        blank=True, null=True,
+                                        verbose_name=_('Dependencies'),
+                                        related_name='blocks')
+
     # Review-related information
 
     # The timestamp representing the last public activity of a review.
@@ -1079,12 +1084,33 @@ class ReviewRequestDraft(BaseReviewRequestDetails):
     repository = property(lambda self: self.review_request.repository)
     local_site = property(lambda self: self.review_request.local_site)
 
+    depends_on = models.ManyToManyField('ReviewRequest',
+                                        blank=True, null=True,
+                                        verbose_name=_('Dependencies'),
+                                        related_name='draft_blocks')
+
     # Set this up with a ConcurrencyManager to help prevent race conditions.
     objects = ConcurrencyManager()
 
     def get_latest_diffset(self):
         """Returns the diffset for this draft."""
         return self.diffset
+
+    def is_accessible_by(self, user):
+        """Returns whether or not the user can access this draft."""
+        return self.is_mutable_by(user)
+
+    def is_mutable_by(self, user):
+        """Returns whether or not the user can modify this draft."""
+        return self.review_request.is_mutable_by(user)
+
+    def is_accessible_by(self, user):
+        """Returns whether or not the user can access this draft."""
+        return self.is_mutable_by(user)
+
+    def is_mutable_by(self, user):
+        """Returns whether or not the user can modify this draft."""
+        return self.review_request.is_mutable_by(user)
 
     @staticmethod
     def create(review_request):
@@ -1155,6 +1181,7 @@ class ReviewRequestDraft(BaseReviewRequestDetails):
            *  'description'
            *  'testing_done'
            *  'bugs_closed'
+           *  'depends_on'
            *  'branch'
            *  'target_groups'
            *  'target_people'
@@ -1222,6 +1249,8 @@ class ReviewRequestDraft(BaseReviewRequestDetails):
                     'target_groups', name_field="name")
         update_list(review_request.target_people, self.target_people,
                     'target_people', name_field="username")
+        update_list(review_request.depends_on, self.depends_on,
+                    'depends_on', name_field='summary')
 
         # Specifically handle bug numbers
         old_bugs = review_request.get_bug_list()
@@ -1426,6 +1455,14 @@ class BaseComment(models.Model):
         return self.reply_to_id is not None
     is_reply.boolean = True
 
+    def is_accessible_by(self, user):
+        """Returns whether the user can access this comment."""
+        return self.get_review().is_accessible_by(user)
+
+    def is_mutable_by(self, user):
+        """Returns whether the user can modify this comment."""
+        return self.get_review().is_mutable_by(user)
+
     def public_replies(self, user=None):
         """
         Returns a list of public replies to this comment, optionally
@@ -1553,6 +1590,20 @@ class FileAttachmentComment(BaseComment):
         """
         return self.file_attachment.review_ui.get_comment_thumbnail(self)
 
+    def get_absolute_url(self):
+        """Returns the URL for this comment."""
+        if self.file_attachment.review_ui:
+            return self.file_attachment.review_ui.get_comment_link_url(self)
+        else:
+            return self.file_attachment.get_absolute_url()
+
+    def get_link_text(self):
+        """Returns the text for the link to the file."""
+        if self.file_attachment.review_ui:
+            return self.file_attachment.review_ui.get_comment_link_text(self)
+        else:
+            return self.file_attachment.filename
+
     def get_file(self):
         """
         Generates the file referenced by this
@@ -1646,6 +1697,17 @@ class Review(models.Model):
                   for u in reply.participants]
 
     participants = property(get_participants)
+
+    def is_accessible_by(self, user):
+        """Returns whether the user can access this review."""
+        return ((self.public or self.user == user or user.is_superuser) and
+                self.review_request.is_accessible_by(user))
+
+    def is_mutable_by(self, user):
+        """Returns whether the user can modify this review."""
+        return ((not self.public and
+                 (self.user == user or user.is_superuser)) and
+                self.review_request.is_accessible_by(user))
 
     def __unicode__(self):
         return u"Review of '%s'" % self.review_request

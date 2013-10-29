@@ -25,7 +25,7 @@ def review_request_closed_cb(sender, user, review_request, **kwargs):
     """
     siteconfig = SiteConfiguration.objects.get_current()
     if siteconfig.get("mail_send_review_close_mail"):
-        mail_review_request(user, review_request, on_close=True)
+        mail_review_request(review_request, on_close=True)
 
 
 def review_request_published_cb(sender, user, review_request, changedesc,
@@ -37,7 +37,7 @@ def review_request_published_cb(sender, user, review_request, changedesc,
     """
     siteconfig = SiteConfiguration.objects.get_current()
     if siteconfig.get("mail_send_review_mail"):
-        mail_review_request(user, review_request, changedesc)
+        mail_review_request(review_request, changedesc)
 
 
 def review_published_cb(sender, user, review, **kwargs):
@@ -48,7 +48,7 @@ def review_published_cb(sender, user, review, **kwargs):
     """
     siteconfig = SiteConfiguration.objects.get_current()
     if siteconfig.get("mail_send_review_mail"):
-        mail_review(user, review)
+        mail_review(review)
 
 
 def reply_published_cb(sender, user, reply, **kwargs):
@@ -59,7 +59,7 @@ def reply_published_cb(sender, user, reply, **kwargs):
     """
     siteconfig = SiteConfiguration.objects.get_current()
     if siteconfig.get("mail_send_review_mail"):
-        mail_reply(user, reply)
+        mail_reply(reply)
 
 
 def user_registered_cb(user, **kwargs):
@@ -223,9 +223,12 @@ def send_review_mail(user, review_request, subject, in_reply_to,
     headers = {
         'X-ReviewBoard-URL': base_url,
         'X-ReviewRequest-URL': base_url + review_request.get_absolute_url(),
-        'X-ReviewGroup': ', '.join(group.name for group in \
-                                    review_request.target_groups.all())
+        'X-ReviewGroup': ', '.join(group.name for group in
+                                   review_request.target_groups.all()),
     }
+
+    if review_request.repository:
+        headers['X-ReviewRequest-Repository'] = review_request.repository.name
 
     sender = None
 
@@ -255,7 +258,7 @@ def send_review_mail(user, review_request, subject, in_reply_to,
     return message.message_id
 
 
-def mail_review_request(user, review_request, changedesc=None, on_close=False):
+def mail_review_request(review_request, changedesc=None, on_close=False):
     """
     Send an e-mail representing the supplied review request.
 
@@ -276,7 +279,8 @@ def mail_review_request(user, review_request, changedesc=None, on_close=False):
         or (not on_close and review_request.status == 'D')):
         return
 
-    subject = u"[Code Review] %d: %s" % (review_request.id, review_request.summary)
+    subject = u"[Code Review] %d: %s" % (review_request.display_id,
+                                          review_request.summary)
     reply_message_id = None
 
     if review_request.email_message_id:
@@ -298,15 +302,15 @@ def mail_review_request(user, review_request, changedesc=None, on_close=False):
 
     review_request.time_emailed = timezone.now()
     review_request.email_message_id = \
-        send_review_mail(user, review_request, subject, reply_message_id,
-                         extra_recipients,
+        send_review_mail(review_request.submitter, review_request, subject,
+                         reply_message_id, extra_recipients,
                          'notifications/review_request_email.txt',
                          'notifications/review_request_email.html',
                          extra_context)
     review_request.save()
 
 
-def mail_review(user, review):
+def mail_review(review):
     """Sends an e-mail representing the supplied review."""
     review_request = review.review_request
 
@@ -317,7 +321,7 @@ def mail_review(user, review):
         review.comments.order_by('filediff', 'first_line')
 
     extra_context = {
-        'user': user,
+        'user': review.user,
         'review': review,
     }
 
@@ -327,9 +331,11 @@ def mail_review(user, review):
             "notifications/email_diff_comment_fragment.html")
 
     review.email_message_id = \
-        send_review_mail(user,
+        send_review_mail(review.user,
                          review_request,
-                         u"Re: [Code Review] %d: %s" % (review_request.id, review_request.summary),
+                         u"Re: [Code Review] %d: %s" % (
+                             review_request.display_id,
+                             review_request.summary),
                          review_request.email_message_id,
                          None,
                          'notifications/review_email.txt',
@@ -339,7 +345,7 @@ def mail_review(user, review):
     review.save()
 
 
-def mail_reply(user, reply):
+def mail_reply(reply):
     """
     Sends an e-mail representing the supplied reply to a review.
     """
@@ -350,7 +356,7 @@ def mail_reply(user, reply):
         return
 
     extra_context = {
-        'user': user,
+        'user': reply.user,
         'review': review,
         'reply': reply,
     }
@@ -362,9 +368,11 @@ def mail_reply(user, reply):
             "notifications/email_diff_comment_fragment.html")
 
     reply.email_message_id = \
-        send_review_mail(user,
+        send_review_mail(reply.user,
                          review_request,
-                         u"Re: [Code Review] %d: %s" % (review_request.id, review_request.summary),
+                         u"Re: [Code Review] %d: %s" % (
+                             review_request.display_id,
+                             review_request.summary),
                          review.email_message_id,
                          review.participants,
                          'notifications/reply_email.txt',

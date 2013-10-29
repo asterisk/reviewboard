@@ -2,11 +2,12 @@ import re
 
 from django import template
 from django.template.loader import render_to_string
+from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django.utils.translation import ugettext as _
 from djblets.util.decorators import basictag
 
-from reviewboard.diffviewer.diffutils import STYLED_MAX_LINE_LEN
+from reviewboard.diffviewer.chunk_generator import DiffChunkGenerator
 
 
 register = template.Library()
@@ -210,7 +211,7 @@ def diff_chunk_header(context, header):
         expandable = False
 
     return _diff_expand_link(context, expandable,
-                             '<code>%s</code>' % header['text'],
+                             '<code>%s</code>' % escape(header['text']),
                              _('Expand to header'),
                              (lines_of_context[0],
                               expand_offset + lines_of_context[1]),
@@ -267,18 +268,20 @@ def diff_lines(file, chunk, standalone, line_fmt, anchor_fmt,
                 class_attr = ' class="%s"' % classes
 
             if is_replace:
-                if len(line1) < STYLED_MAX_LINE_LEN:
+                if len(line1) < DiffChunkGenerator.STYLED_MAX_LINE_LEN:
                     line1 = highlightregion(line1, line[3])
 
-                if len(line2) < STYLED_MAX_LINE_LEN:
+                if len(line2) < DiffChunkGenerator.STYLED_MAX_LINE_LEN:
                     line2 = highlightregion(line2, line[6])
         else:
             show_collapse = (i == 0 and standalone)
 
-        if not is_insert and len(line1) < STYLED_MAX_LINE_LEN:
+        if (not is_insert and
+            len(line1) < DiffChunkGenerator.STYLED_MAX_LINE_LEN):
             line1 = showextrawhitespace(line1)
 
-        if not is_delete and len(line2) < STYLED_MAX_LINE_LEN:
+        if (not is_delete and
+            len(line2) < DiffChunkGenerator.STYLED_MAX_LINE_LEN):
             line2 = showextrawhitespace(line2)
 
         moved_from = {}

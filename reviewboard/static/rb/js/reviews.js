@@ -48,6 +48,12 @@ var gEditorCompleteHandlers = {
             .addClass("user")
             .user_infobox();
     },
+    'depends_on': function(data) {
+        return urlizeList(data,
+            function(item) { return item.url; },
+            function(item) { return item.id; }
+        );
+    },
     'description': linkifyText,
     'testing_done': linkifyText
 };
@@ -194,12 +200,16 @@ function setDraftField(field, value) {
                 if (rsp.fields[field].length == 1) {
                     if (field == "target_groups") {
                         message = "Group " + message + " does not exist.";
+                    } else if (field === "depends_on") {
+                        message = "Review request " + message + " does not exist.";
                     } else {
                         message = "User " + message + " does not exist.";
                     }
                 } else {
                     if (field == "target_groups") {
                         message = "Groups " + message + " do not exist.";
+                    } else if (field === "depends_on") {
+                        message = "Review requests " + message + " do not exist.";
                     } else {
                         message = "Users " + message + " do not exist.";
                     }
@@ -257,10 +267,12 @@ $.fn.reviewsAutoComplete = function(options) {
         $(this)
             .rbautocomplete({
                 formatItem: function(data) {
-                    var s = data[options.nameKey];
+                    var s = data[options.nameKey],
+                        desc;
 
                     if (options.descKey && data[options.descKey]) {
-                        s += " <span>(" + data[options.descKey] + ")</span>";
+                        s += " <span>(" + _.escape(data[options.descKey]) +
+                             ")</span>";
                     }
 
                     return s;
@@ -594,11 +606,20 @@ $.fn.commentIssue = function(review_id, comment_id, comment_type,
 
     self.update_issue_summary_table = function(new_status, old_status, timestamp) {
         var comment_id = self.comment_id,
-            entry = $('#summary-table-entry-' + comment_id);
+            entry = $('#summary-table-entry-' + comment_id),
+            buttonTop = self.offset().top;
 
         issueSummaryTableManager.updateStatus(entry, old_status, new_status);
         issueSummaryTableManager.updateCounters(old_status, new_status);
         issueSummaryTableManager.updateTimeStamp(entry, timestamp);
+
+        /*
+         * Update the scroll position to counteract the addition/deletion
+         * of the entry in the issue summary table, so the page doesn't
+         * appear to jump.
+         */
+        $(window).scrollTop($(window).scrollTop() + self.offset().top -
+                            buttonTop);
     }
 
     var open_state = {
@@ -833,7 +854,6 @@ $.fn.floatReplyDraftBanner = function() {
  * @return {jQuery} This jQuery.
  */
 $.fn.commentDlg = function() {
-    var DIALOG_TOTAL_HEIGHT = 250;
     var SLIDE_DISTANCE = 10;
     var COMMENTS_BOX_WIDTH = 280;
     var FORM_BOX_WIDTH = 380;
@@ -845,6 +865,7 @@ $.fn.commentDlg = function() {
     var textFieldHeightDiff = 0;
     var dirty = false;
     var ignoreKeyUp = false;
+    var defaultDialogHeight = 250;
 
     /* Page elements */
     var draftForm    = $("#draft-form", this);
@@ -1001,9 +1022,20 @@ $.fn.commentDlg = function() {
         });
     }
 
-    if (!gUserAuthenticated) {
-        textField.attr("disabled", true);
+    if (!gUserAuthenticated || this.find('.draft-warning').length !== 0) {
+        textField
+            .attr("disabled", true)
+            .hide();
+
+        issueOptions.hide();
+
+        issueField.attr("disabled", true);
         saveButton.attr("disabled", true);
+
+        buttons.find('[id!=comment_cancel]').hide();
+        buttons.find('#comment_cancel').val('Close');
+
+        defaultDialogHeight = 120;
     }
 
     /*
@@ -1174,7 +1206,7 @@ $.fn.commentDlg = function() {
 
         self
             .width(width)
-            .height(DIALOG_TOTAL_HEIGHT);
+            .height(defaultDialogHeight);
 
         return this;
     }

@@ -3,13 +3,15 @@ import logging
 import urllib2
 
 from django import forms
+from django.conf import settings
 from django.contrib.sites.models import Site
 from django.utils import simplejson
 from django.utils.translation import ugettext_lazy as _
 from djblets.siteconfig.models import SiteConfiguration
 
-from reviewboard.hostingsvcs.errors import AuthorizationError, \
-                                           SSHKeyAssociationError
+from reviewboard.hostingsvcs.errors import (AuthorizationError,
+                                            InvalidPlanError,
+                                            SSHKeyAssociationError)
 from reviewboard.hostingsvcs.forms import HostingServiceForm
 from reviewboard.hostingsvcs.service import HostingService
 from reviewboard.scmtools.errors import FileNotFoundError
@@ -151,11 +153,31 @@ class GitHub(HostingService):
     supports_ssh_key_association = True
     supported_scmtools = ['Git']
 
-    API_URL = 'https://api.github.com/'
+    # This should be the prefix for every field on the plan forms.
+    plan_field_prefix = 'github'
+
     RAW_MIMETYPE = 'application/vnd.github.v3.raw'
 
-    def authorize(self, username, password, local_site_name=None,
-                  *args, **kwargs):
+    def get_api_url(self, hosting_url):
+        """Returns the API URL for GitHub.
+
+        This can be overridden to provide more advanced lookup (intended
+        for the GitHub Enterprise support).
+        """
+        assert not hosting_url
+        return 'https://api.github.com/'
+
+    def get_plan_field(self, plan, plan_data, name):
+        """Returns the value of a field for plan-specific data.
+
+        This takes into account the plan type and hosting service ID.
+        """
+        key = '%s_%s_%s' % (self.plan_field_prefix, plan.replace('-', '_'),
+                            name)
+        return plan_data[key]
+
+    def authorize(self, username, password, hosting_url,
+                  local_site_name=None, *args, **kwargs):
         site = Site.objects.get_current()
         siteconfig = SiteConfiguration.objects.get_current()
 
@@ -165,18 +187,30 @@ class GitHub(HostingService):
             local_site_reverse('root', local_site_name=local_site_name))
 
         try:
+            body = {
+                'scopes': [
+                    'user',
+                    'repo',
+                ],
+                'note': 'Access for Review Board',
+                'note_url': site_url,
+            }
+
+            # If the site is using a registered GitHub application,
+            # send it in the requests. This will gain the benefits of
+            # a GitHub application, such as higher rate limits.
+            if (hasattr(settings, 'GITHUB_CLIENT_ID') and
+                hasattr(settings, 'GITHUB_CLIENT_SECRET')):
+                body.update({
+                    'client_id': settings.GITHUB_CLIENT_ID,
+                    'client_secret': settings.GITHUB_CLIENT_SECRET,
+                })
+
             rsp, headers = self._json_post(
-                url=self.API_URL + 'authorizations',
+                url=self.get_api_url(hosting_url) + 'authorizations',
                 username=username,
                 password=password,
-                body=simplejson.dumps({
-                    'scopes': [
-                        'user',
-                        'repo',
-                    ],
-                    'note': 'Access for Review Board',
-                    'note_url': site_url,
-                }))
+                body=simplejson.dumps(body))
         except (urllib2.HTTPError, urllib2.URLError), e:
             data = e.read()
 
@@ -229,8 +263,9 @@ class GitHub(HostingService):
         # user key (associated with the currently authorized user account),
         # so check both.
         deploy_keys_url = self._build_api_url(repository, 'keys')
+        api_url = self.get_api_url(self.account.hosting_url)
         user_keys_url = ('%suser/keys?access_token=%s'
-                         % (self.API_URL,
+                         % (api_url,
                             self.account.data['authorization']['token']))
 
         for url in (deploy_keys_url, user_keys_url):
@@ -338,17 +373,14 @@ class GitHub(HostingService):
     def _get_repo_api_url(self, repository):
         plan = repository.extra_data['repository_plan']
 
-        if plan == 'public':
-            repo_name = repository.extra_data['github_public_repo_name']
+        if plan in ('public', 'private'):
             owner = self.account.username
-        elif plan == 'private':
-            repo_name = repository.extra_data['github_private_repo_name']
-            owner = self.account.username
-        elif plan == 'public-org':
-            repo_name = repository.extra_data['github_public_org_repo_name']
-            owner = repository.extra_data['github_public_org_name']
-        elif plan == 'private-org':
-            repo_name = repository.extra_data['github_private_org_repo_name']
-            owner = repository.extra_data['github_private_org_name']
+        elif plan in ('public-org', 'private-org'):
+            owner = self.get_plan_field(plan, repository.extra_data, 'name')
+        else:
+            raise InvalidPlanError(plan)
 
-        return '%srepos/%s/%s/' % (self.API_URL, owner, repo_name)
+        return '%srepos/%s/%s/' % (
+            self.get_api_url(self.account.hosting_url),
+            owner,
+            self.get_plan_field(plan, repository.extra_data, 'repo_name'))

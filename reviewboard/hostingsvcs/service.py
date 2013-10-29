@@ -2,10 +2,29 @@ import base64
 import logging
 import mimetools
 import urllib2
-from pkg_resources import iter_entry_points
+from urlparse import urlparse
 
 from django.utils import simplejson
 from django.utils.translation import ugettext_lazy as _
+from pkg_resources import iter_entry_points
+
+
+class HTTPErrorProcessor(urllib2.HTTPErrorProcessor):
+    """Processes HTTP error codes.
+
+    Python 2.6+ gets HTTP error code processing right, but 2.5 only accepts
+    HTTP 200 and 206 as success codes. This handler ensures that anything
+    in the 200 range is a success.
+    """
+    def http_response(self, request, response):
+        if not (200 <= response.code < 300):
+            response = self.parent.error('http', request, response,
+                                         response.code, response.msg,
+                                         response.info())
+
+        return response
+
+    https_response = http_response
 
 
 class HostingService(object):
@@ -28,6 +47,7 @@ class HostingService(object):
     supports_bug_trackers = False
     supports_repositories = False
     supports_ssh_key_association = False
+    self_hosted = False
 
     # These values are defaults that can be overridden in repository_plans
     # above.
@@ -73,9 +93,25 @@ class HostingService(object):
         """
         raise NotImplementedError
 
-    def authorize(self, username, password, local_site_name=None,
+    def authorize(self, username, password, hosting_url, local_site_name=None,
                   *args, **kwargs):
         raise NotImplementedError
+
+    def check_repository(self, path, username, password, scmtool_class,
+                         local_site_name, *args, **kwargs):
+        """Checks the validity of a repository configuration.
+
+        This performs a check against the hosting service or repository
+        to ensure that the information provided by the user represents
+        a valid repository.
+
+        This is passed in the repository details, such as the path and
+        raw credentials, as well as the SCMTool class being used, the
+        LocalSite's name (if any), and all field data from the
+        HostingServiceForm as keyword arguments.
+        """
+        return scmtool_class.check_repository(path, username, password,
+                                              local_site_name)
 
     def get_file(self, repository, path, revision, *args, **kwargs):
         if not self.supports_repositories:
@@ -90,7 +126,8 @@ class HostingService(object):
         return repository.get_scmtool().file_exists(path, revision)
 
     @classmethod
-    def get_repository_fields(cls, username, plan, tool_name, field_vars):
+    def get_repository_fields(cls, username, hosting_url, plan, tool_name,
+                              field_vars):
         if not cls.supports_repositories:
             raise NotImplementedError
 
@@ -101,6 +138,10 @@ class HostingService(object):
 
         new_vars = field_vars.copy()
         new_vars['hosting_account_username'] = username
+
+        if cls.self_hosted:
+            new_vars['hosting_url'] = hosting_url
+            new_vars['hosting_domain'] = urlparse(hosting_url)[1]
 
         results = {}
 
@@ -178,9 +219,7 @@ class HostingService(object):
         return simplejson.loads(data), headers
 
     def _http_get(self, url, *args, **kwargs):
-        r = self._build_request(url, *args, **kwargs)
-        u = urllib2.urlopen(r)
-        return u.read(), u.headers
+        return self._http_request(url, **kwargs)
 
     def _http_post(self, url, body=None, fields={}, files={},
                    content_type=None, headers={}, *args, **kwargs):
@@ -197,9 +236,7 @@ class HostingService(object):
 
         headers['Content-Length'] = str(len(body))
 
-        r = self._build_request(url, body, headers, **kwargs)
-        u = urllib2.urlopen(r)
-        return u.read(), u.headers
+        return self._http_request(url, body, headers, **kwargs)
 
     def _build_request(self, url, body=None, headers={}, username=None,
                        password=None):
@@ -211,6 +248,13 @@ class HostingService(object):
                                                        password))
 
         return r
+
+    def _http_request(self, url, body=None, headers={}, **kwargs):
+        r = self._build_request(url, body, headers, **kwargs)
+        opener = urllib2.build_opener(HTTPErrorProcessor())
+        u = opener.open(r)
+
+        return u.read(), u.headers
 
     def _build_form_data(self, fields, files):
         """Encodes data for use in an HTTP POST."""
@@ -240,20 +284,33 @@ class HostingService(object):
         return content_type, content
 
 
+_hosting_services = {}
+
+
+def _populate_hosting_services():
+    """Populates a list of known hosting services from Python entrypoints.
+
+    This is called any time we need to access or modify the list of hosting
+    services, to ensure that we have loaded the initial list once.
+    """
+    if not _hosting_services:
+        for entry in iter_entry_points('reviewboard.hosting_services'):
+            try:
+                _hosting_services[entry.name] = entry.load()
+            except Exception, e:
+                logging.error('Unable to load repository hosting service %s: %s' %
+                              (entry, e))
+
+
 def get_hosting_services():
     """Gets the list of hosting services.
 
     This will return an iterator for iterating over each hosting service.
     """
-    for entry in iter_entry_points('reviewboard.hosting_services'):
-        try:
-            cls = entry.load()
-        except Exception, e:
-            logging.error('Unable to load repository hosting service %s: %s' %
-                          (entry, e))
-            continue
+    _populate_hosting_services()
 
-        yield (entry.name, cls)
+    for name, cls in _hosting_services.iteritems():
+        yield name, cls
 
 
 def get_hosting_service(name):
@@ -261,15 +318,32 @@ def get_hosting_service(name):
 
     If the hosting service is not found, None will be returned.
     """
-    entries = list(iter_entry_points('reviewboard.hosting_services', name))
+    _populate_hosting_services()
 
-    if entries:
-        entry = entries[0]
+    return _hosting_services.get(name, None)
 
-        try:
-            return entry.load()
-        except Exception, e:
-            logging.error('Unable to load repository hosting service %s: %s' %
-                          (entry, e))
 
-    return None
+def register_hosting_service(name, cls):
+    """Registers a custom hosting service class.
+
+    A name can only be registered once. A KeyError will be thrown if attempting
+    to register a second time.
+    """
+    _populate_hosting_services()
+
+    if name in _hosting_services:
+        raise KeyError('"%s" is already a registered hosting service' % name)
+
+    _hosting_services[name] = cls
+
+
+def unregister_hosting_service(name):
+    """Unregisters a previously registered hosting service."""
+    _populate_hosting_services()
+
+    try:
+        del _hosting_services[name]
+    except KeyError:
+        logging.error('Failed to unregister unknown hosting service "%s"' %
+                      name)
+        raise KeyError('"%s" is not a registered hosting service' % name)

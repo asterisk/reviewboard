@@ -1,4 +1,4 @@
-<VirtualHost *:80>
+<VirtualHost *:@port@>
 	ServerName @sitedomain@
 	DocumentRoot "@sitedir@/htdocs"
 
@@ -29,6 +29,20 @@
 	</Location>
 	<Location "@siteroot@errordocs">
 		SetHandler None
+	</Location>
+
+	# Prevent the server from processing or allowing the rendering of
+	# certain file types.
+	<Location "@siteroot@media/uploaded">
+		SetHandler None
+		Options None
+
+		AddType text/plain .html .htm .shtml .php .php3 .php4 .php5 .phps .asp
+		AddType text/plain .pl .py .fcgi .cgi .phtml .phtm .pht .jsp .sh .rb
+
+		<IfModule mod_php5.c>
+			php_flag engine off
+		</IfModule>
 	</Location>
 
 	<Directory "@sitedir@/htdocs">

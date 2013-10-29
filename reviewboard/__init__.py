@@ -4,7 +4,7 @@
 #
 #   (Major, Minor, Micro, Patch, alpha/beta/rc/final, Release Number, Released)
 #
-VERSION = (1, 7, 6, 0, 'final', 0, True)
+VERSION = (1, 7, 16, 0, 'final', 0, True)
 
 
 def get_version_string():
@@ -59,8 +59,12 @@ def initialize():
     import os
     import sys
 
-    # Set PYTHONPATH to match sys.patch, for subprocesses.
-    os.environ['PYTHONPATH'] = ':'.join(sys.path)
+    import settings_local
+
+    # Set RBSITE_PYTHON_PATH to the path we need for any RB-bundled
+    # scripts we may call.
+    os.environ['RBSITE_PYTHONPATH'] = \
+        os.path.dirname(settings_local.__file__)
 
     from django.conf import settings
     from django.db import DatabaseError

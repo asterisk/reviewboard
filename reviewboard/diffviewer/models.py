@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 from djblets.util.fields import Base64Field
 
-from reviewboard.diffviewer.managers import FileDiffDataManager
+from reviewboard.diffviewer.managers import FileDiffDataManager, DiffSetManager
 from reviewboard.scmtools.core import PRE_CREATION
 from reviewboard.scmtools.models import Repository
 
@@ -143,6 +143,12 @@ class DiffSet(models.Model):
         default=0,
         help_text=_("The diff generator compatibility version to use. "
                     "This can and should be ignored."))
+
+    base_commit_id = models.CharField(
+        _('commit ID'), max_length=64, blank=True, null=True, db_index=True,
+        help_text=_('The ID/revision this change is built upon.'))
+
+    objects = DiffSetManager()
 
     def save(self, **kwargs):
         """

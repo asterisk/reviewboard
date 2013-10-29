@@ -52,9 +52,11 @@ LANGUAGES = (
 
 # List of callables that know how to import templates from various sources.
 TEMPLATE_LOADERS = (
-    'django.template.loaders.filesystem.Loader',
-    'django.template.loaders.app_directories.Loader',
-    'djblets.extensions.loaders.load_template_source',
+    ('django.template.loaders.cached.Loader', (
+        'django.template.loaders.filesystem.Loader',
+        'django.template.loaders.app_directories.Loader',
+        'djblets.extensions.loaders.load_template_source',
+    )),
 )
 
 MIDDLEWARE_CLASSES = [
@@ -80,6 +82,10 @@ MIDDLEWARE_CLASSES = [
     'reviewboard.admin.middleware.CheckUpdatesRequiredMiddleware',
     'reviewboard.admin.middleware.X509AuthMiddleware',
     'reviewboard.site.middleware.LocalSiteMiddleware',
+
+    # Keep this last so that everything is initialized before middleware
+    # from extensions are run.
+    'djblets.extensions.middleware.ExtensionsMiddlewareRunner',
 ]
 RB_EXTRA_MIDDLEWARE_CLASSES = []
 
@@ -177,6 +183,7 @@ CACHES = {
 }
 
 LOGGING_NAME = "reviewboard"
+LOGGING_REQUEST_FORMAT = "%(_local_site_name)s - %(user)s - %(path)s"
 
 AUTH_PROFILE_MODULE = "accounts.Profile"
 
@@ -211,7 +218,11 @@ PRODUCTION = True
 LANGUAGE_COOKIE_NAME = "rblanguage"
 SESSION_COOKIE_NAME = "rbsessionid"
 SESSION_COOKIE_AGE = 365 * 24 * 60 * 60 # 1 year
-SESSION_COOKIE_PATH = SITE_ROOT
+
+# Default support settings
+DEFAULT_SUPPORT_URL = 'http://www.beanbaginc.com/support/reviewboard/' \
+                      '?support-data=%(support_data)s'
+
 
 # Load local settings.  This can override anything in here, but at the very
 # least it needs to define database connectivity.
@@ -221,6 +232,7 @@ try:
 except ImportError, exc:
     dependency_error('Unable to import settings_local.py: %s' % exc)
 
+SESSION_COOKIE_PATH = SITE_ROOT
 
 INSTALLED_APPS = RB_BUILTIN_APPS + RB_EXTRA_APPS + ['django_evolution']
 MIDDLEWARE_CLASSES += RB_EXTRA_MIDDLEWARE_CLASSES
@@ -274,7 +286,7 @@ LOGIN_URL = SITE_ROOT + 'account/login/'
 PIPELINE_JS = {
     '3rdparty': {
         'source_filenames': (
-            'lib/js/underscore-1.3.3.min.js',
+            'lib/js/underscore-1.4.4.min.js',
             'lib/js/backbone-0.9.2.min.js',
             'lib/js/jquery.form.js',
             'lib/js/jquery.timesince.js',

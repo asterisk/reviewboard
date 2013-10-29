@@ -9,7 +9,9 @@ try:
 except ImportError:
     from md5 import md5
 
+from django import forms
 from django.contrib.auth.models import AnonymousUser, User
+from django.core.cache import cache
 from django.test import TestCase as DjangoTestCase
 from djblets.util.filesystem import is_exe_in_path
 import nose
@@ -25,7 +27,11 @@ except ImportError:
 
 from reviewboard.diffviewer.diffutils import patch
 from reviewboard.diffviewer.parser import DiffParserError
+from reviewboard.hostingsvcs.forms import HostingServiceForm
 from reviewboard.hostingsvcs.models import HostingServiceAccount
+from reviewboard.hostingsvcs.service import HostingService, \
+                                            register_hosting_service, \
+                                            unregister_hosting_service
 from reviewboard.reviews.models import Group
 from reviewboard.scmtools.core import HEAD, PRE_CREATION, ChangeSet, Revision
 from reviewboard.scmtools.errors import SCMError, FileNotFoundError, \
@@ -35,6 +41,9 @@ from reviewboard.scmtools.forms import RepositoryForm
 from reviewboard.scmtools.git import ShortSHA1Error
 from reviewboard.scmtools.models import Repository, Tool
 from reviewboard.scmtools.perforce import STunnelProxy, STUNNEL_SERVER
+from reviewboard.scmtools.signals import checked_file_exists, \
+                                         checking_file_exists, \
+                                         fetched_file, fetching_file
 from reviewboard.site.models import LocalSite
 from reviewboard.ssh.client import SSHClient
 from reviewboard.ssh.tests import SSHTestCase
@@ -151,9 +160,188 @@ class CoreTests(DjangoTestCase):
         self.assert_(len(cs.files) == 0)
 
 
+class RepositoryTests(DjangoTestCase):
+    fixtures = ['test_scmtools']
+
+    def setUp(self):
+        self.local_repo_path = os.path.join(os.path.dirname(__file__),
+                                            'testdata', 'git_repo')
+        self.repository = Repository(name='Git test repo',
+                                     path=self.local_repo_path,
+                                     tool=Tool.objects.get(name='Git'))
+
+        self.scmtool_cls = self.repository.get_scmtool().__class__
+        self.old_get_file = self.scmtool_cls.get_file
+        self.old_file_exists = self.scmtool_cls.file_exists
+
+    def tearDown(self):
+        cache.clear()
+
+        self.scmtool_cls.get_file = self.old_get_file
+        self.scmtool_cls.file_exists = self.old_file_exists
+
+    def test_get_file_caching(self):
+        """Testing Repository.get_file caches result"""
+        def get_file(self, path, revision):
+            num_calls['get_file'] += 1
+            return 'file data'
+
+        num_calls = {
+            'get_file': 0,
+        }
+
+        path = 'readme'
+        revision = 'e965047'
+        request = {}
+
+        self.scmtool_cls.get_file = get_file
+
+        data1 = self.repository.get_file(path, revision, request=request)
+        data2 = self.repository.get_file(path, revision, request=request)
+
+        self.assertEqual(data1, 'file data')
+        self.assertEqual(data1, data2)
+        self.assertEqual(num_calls['get_file'], 1)
+
+    def test_get_file_signals(self):
+        """Testing Repository.get_file emits signals"""
+        def on_fetching_file(sender, path, revision, request, **kwargs):
+            found_signals.append(('fetching_file', path, revision, request))
+
+        def on_fetched_file(sender, path, revision, request, **kwargs):
+            found_signals.append(('fetched_file', path, revision, request))
+
+        found_signals = []
+
+        fetching_file.connect(on_fetching_file, sender=self.repository)
+        fetched_file.connect(on_fetched_file, sender=self.repository)
+
+        path = 'readme'
+        revision = 'e965047'
+        request = {}
+
+        self.repository.get_file(path, revision, request=request)
+
+        self.assertEqual(len(found_signals), 2)
+        self.assertEqual(found_signals[0],
+                         ('fetching_file', path, revision, request))
+        self.assertEqual(found_signals[1],
+                         ('fetched_file', path, revision, request))
+
+    def test_get_file_exists_caching_when_exists(self):
+        """Testing Repository.get_file_exists caches result when exists"""
+        def file_exists(self, path, revision):
+            num_calls['get_file_exists'] += 1
+            return True
+
+        num_calls = {
+            'get_file_exists': 0,
+        }
+
+        path = 'readme'
+        revision = 'e965047'
+        request = {}
+
+        self.scmtool_cls.file_exists = file_exists
+
+        exists1 = self.repository.get_file_exists(path, revision,
+                                                  request=request)
+        exists2 = self.repository.get_file_exists(path, revision,
+                                                  request=request)
+
+        self.assertTrue(exists1)
+        self.assertTrue(exists2)
+        self.assertEqual(num_calls['get_file_exists'], 1)
+
+    def test_get_file_exists_caching_when_not_exists(self):
+        """Testing Repository.get_file_exists doesn't cache result when not exists"""
+        def file_exists(self, path, revision):
+            num_calls['get_file_exists'] += 1
+            return False
+
+        num_calls = {
+            'get_file_exists': 0,
+        }
+
+        path = 'readme'
+        revision = '12345'
+        request = {}
+
+        self.scmtool_cls.file_exists = file_exists
+
+        exists1 = self.repository.get_file_exists(path, revision,
+                                                  request=request)
+        exists2 = self.repository.get_file_exists(path, revision,
+                                                  request=request)
+
+        self.assertFalse(exists1)
+        self.assertFalse(exists2)
+        self.assertEqual(num_calls['get_file_exists'], 2)
+
+    def test_get_file_exists_caching_with_fetched_file(self):
+        """Testing Repository.get_file_exists uses get_file's cached result"""
+        def get_file(self, path, revision):
+            num_calls['get_file'] += 1
+            return 'file data'
+
+        def file_exists(self, path, revision):
+            num_calls['get_file_exists'] += 1
+            return True
+
+        num_calls = {
+            'get_file_exists': 0,
+            'get_file': 0,
+        }
+
+        path = 'readme'
+        revision = 'e965047'
+        request = {}
+
+        self.scmtool_cls.get_file = get_file
+        self.scmtool_cls.file_exists = file_exists
+
+        self.repository.get_file(path, revision, request=request)
+        exists1 = self.repository.get_file_exists(path, revision,
+                                                  request=request)
+        exists2 = self.repository.get_file_exists(path, revision,
+                                                  request=request)
+
+        self.assertTrue(exists1)
+        self.assertTrue(exists2)
+        self.assertEqual(num_calls['get_file'], 1)
+        self.assertEqual(num_calls['get_file_exists'], 0)
+
+    def test_get_file_exists_signals(self):
+        """Testing Repository.get_file_exists emits signals"""
+        def on_checking(sender, path, revision, request, **kwargs):
+            found_signals.append(('checking_file_exists', path,
+                                  revision, request))
+
+        def on_checked(sender, path, revision, request, **kwargs):
+            found_signals.append(('checked_file_exists', path,
+                                  revision, request))
+
+        found_signals = []
+
+        checking_file_exists.connect(on_checking, sender=self.repository)
+        checked_file_exists.connect(on_checked, sender=self.repository)
+
+        path = 'readme'
+        revision = 'e965047'
+        request = {}
+
+        self.repository.get_file_exists(path, revision, request=request)
+
+        self.assertEqual(len(found_signals), 2)
+        self.assertEqual(found_signals[0],
+                         ('checking_file_exists', path, revision, request))
+        self.assertEqual(found_signals[1],
+                         ('checked_file_exists', path, revision, request))
+
+
 class BZRTests(SCMTestCase):
     """Unit tests for bzr."""
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(BZRTests, self).setUp()
@@ -188,7 +376,7 @@ class BZRTests(SCMTestCase):
 
 class CVSTests(SCMTestCase):
     """Unit tests for CVS."""
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(CVSTests, self).setUp()
@@ -405,7 +593,7 @@ class CVSTests(SCMTestCase):
 
 class SubversionTests(SCMTestCase):
     """Unit tests for subversion."""
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(SubversionTests, self).setUp()
@@ -627,7 +815,7 @@ class PerforceTests(SCMTestCase):
        pieces.  Because we have no control over things like pending
        changesets, not everything can be tested.
        """
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(PerforceTests, self).setUp()
@@ -864,7 +1052,7 @@ class PerforceStunnelTests(SCMTestCase):
     connections and proxy (insecurely) to the public perforce server. We can
     then tell the Perforce SCMTool to connect securely to localhost.
     """
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(PerforceStunnelTests, self).setUp()
@@ -934,7 +1122,7 @@ class PerforceStunnelTests(SCMTestCase):
 
 class VMWareTests(SCMTestCase):
     """Tests for VMware specific code"""
-    fixtures = ['vmware.json', 'test_scmtools.json']
+    fixtures = ['vmware.json', 'test_scmtools']
 
     def setUp(self):
         super(VMWareTests, self).setUp()
@@ -1017,7 +1205,7 @@ class VMWareTests(SCMTestCase):
 
 class MercurialTests(SCMTestCase):
     """Unit tests for mercurial."""
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(MercurialTests, self).setUp()
@@ -1172,7 +1360,7 @@ class MercurialTests(SCMTestCase):
 
 class GitTests(SCMTestCase):
     """Unit tests for Git."""
-    fixtures = ['test_scmtools.json']
+    fixtures = ['test_scmtools']
 
     def setUp(self):
         super(GitTests, self).setUp()
@@ -1684,23 +1872,81 @@ class PolicyTests(DjangoTestCase):
         self.assertFalse(form.is_valid())
 
 
+class TestServiceForm(HostingServiceForm):
+    test_repo_name = forms.CharField(
+        label='Repository name',
+        max_length=64,
+        required=True)
+
+
+class TestService(HostingService):
+    name = 'Test Service'
+    form = TestServiceForm
+    needs_authorization = True
+    supports_repositories = True
+    supports_bug_trackers = True
+    supported_scmtools = ['Git']
+    bug_tracker_field = ('http://example.com/%(hosting_account_username)s/'
+                         '%(test_repo_name)s/issue/%%s')
+    repository_fields = {
+        'Git': {
+            'path': 'http://example.com/%(test_repo_name)s/',
+        },
+    }
+
+    def authorize(self, username, password, hosting_url, local_site_name=None,
+                  *args, **kwargs):
+        self.authorize_args = {
+            'username': username,
+            'password': password,
+            'hosting_url': hosting_url,
+            'local_site_name': local_site_name,
+        }
+
+    def is_authorized(self):
+        return True
+
+    def check_repository(self, *args, **kwargs):
+        pass
+
+
+class SelfHostedTestService(TestService):
+    name = 'Self-Hosted Test'
+    self_hosted = True
+    bug_tracker_field = '%(hosting_url)s/%(test_repo_name)s/issue/%%s'
+    repository_fields = {
+        'Git': {
+            'path': '%(hosting_url)s/%(test_repo_name)s/',
+        },
+    }
+
+
 class RepositoryFormTests(DjangoTestCase):
     fixtures = ['test_scmtools']
 
+    def setUp(self):
+        super(RepositoryFormTests, self).setUp()
+
+        register_hosting_service('test', TestService)
+        register_hosting_service('self_hosted_test', SelfHostedTestService)
+
+        self.git_tool_id = Tool.objects.get(name='Git').pk
+
+    def tearDown(self):
+        super(RepositoryFormTests, self).tearDown()
+
+        unregister_hosting_service('self_hosted_test')
+        unregister_hosting_service('test')
+
     def test_with_hosting_service_new_account(self):
         """Testing RepositoryForm with a hosting service and new account"""
-        try:
-            import mercurial
-        except ImportError:
-            raise nose.SkipTest('Hg is not installed')
-
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'bitbucket',
+            'hosting_type': 'test',
             'hosting_account_username': 'testuser',
             'hosting_account_password': 'testpass',
-            'tool': Tool.objects.get(name='Mercurial').pk,
-            'bitbucket_repo_name': 'testrepo',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
             'bug_tracker_type': 'none',
         })
 
@@ -1709,26 +1955,65 @@ class RepositoryFormTests(DjangoTestCase):
         repository = form.save()
         self.assertEqual(repository.name, 'test')
         self.assertEqual(repository.hosting_account.username, 'testuser')
-        self.assertEqual(repository.hosting_account.service_name, 'bitbucket')
+        self.assertEqual(repository.hosting_account.service_name, 'test')
         self.assertEqual(repository.hosting_account.local_site, None)
         self.assertEqual(repository.extra_data['repository_plan'], '')
+
+    def test_with_hosting_service_self_hosted_and_new_account(self):
+        """Testing RepositoryForm with a self-hosted hosting service and new account"""
+        form = RepositoryForm({
+            'name': 'test',
+            'hosting_type': 'self_hosted_test',
+            'hosting_url': 'https://example.com',
+            'hosting_account_username': 'testuser',
+            'hosting_account_password': 'testpass',
+            'test_repo_name': 'myrepo',
+            'tool': self.git_tool_id,
+            'bug_tracker_type': 'none',
+        })
+        form.validate_repository = False
+
+        self.assertTrue(form.is_valid())
+
+        repository = form.save()
+        self.assertEqual(repository.name, 'test')
+        self.assertEqual(repository.hosting_account.hosting_url,
+                         'https://example.com')
+        self.assertEqual(repository.hosting_account.username, 'testuser')
+        self.assertEqual(repository.hosting_account.service_name,
+                         'self_hosted_test')
+        self.assertEqual(repository.hosting_account.local_site, None)
+        self.assertEqual(repository.extra_data['test_repo_name'], 'myrepo')
+        self.assertEqual(repository.extra_data['hosting_url'],
+                         'https://example.com')
+
+    def test_with_hosting_service_self_hosted_and_blank_url(self):
+        """Testing RepositoryForm with a self-hosted hosting service and blank URL"""
+        form = RepositoryForm({
+            'name': 'test',
+            'hosting_type': 'self_hosted_test',
+            'hosting_url': '',
+            'hosting_account_username': 'testuser',
+            'hosting_account_password': 'testpass',
+            'test_repo_name': 'myrepo',
+            'tool': self.git_tool_id,
+            'bug_tracker_type': 'none',
+        })
+        form.validate_repository = False
+
+        self.assertFalse(form.is_valid())
 
     def test_with_hosting_service_new_account_localsite(self):
         """Testing RepositoryForm with a hosting service, new account and LocalSite"""
         local_site = LocalSite.objects.create(name='testsite')
 
-        try:
-            import mercurial
-        except ImportError:
-            raise nose.SkipTest('Hg is not installed')
-
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'bitbucket',
+            'hosting_type': 'test',
             'hosting_account_username': 'testuser',
             'hosting_account_password': 'testpass',
-            'tool': Tool.objects.get(name='Mercurial').pk,
-            'bitbucket_repo_name': 'testrepo',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
             'bug_tracker_type': 'none',
             'local_site': local_site.pk,
         })
@@ -1739,26 +2024,21 @@ class RepositoryFormTests(DjangoTestCase):
         self.assertEqual(repository.name, 'test')
         self.assertEqual(repository.local_site, local_site)
         self.assertEqual(repository.hosting_account.username, 'testuser')
-        self.assertEqual(repository.hosting_account.service_name, 'bitbucket')
+        self.assertEqual(repository.hosting_account.service_name, 'test')
         self.assertEqual(repository.hosting_account.local_site, local_site)
         self.assertEqual(repository.extra_data['repository_plan'], '')
 
     def test_with_hosting_service_existing_account(self):
         """Testing RepositoryForm with a hosting service and existing account"""
-        try:
-            import mercurial
-        except ImportError:
-            raise nose.SkipTest('Hg is not installed')
-
         account = HostingServiceAccount.objects.create(username='testuser',
-                                                       service_name='bitbucket')
+                                                       service_name='test')
 
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'bitbucket',
+            'hosting_type': 'test',
             'hosting_account': account.pk,
-            'tool': Tool.objects.get(name='Mercurial').pk,
-            'bitbucket_repo_name': 'testrepo',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
             'bug_tracker_type': 'none',
         })
 
@@ -1769,22 +2049,63 @@ class RepositoryFormTests(DjangoTestCase):
         self.assertEqual(repository.hosting_account, account)
         self.assertEqual(repository.extra_data['repository_plan'], '')
 
-    def test_with_hosting_service_custom_bug_tracker(self):
-        """Testing RepositoryForm with a custom bug tracker"""
-        try:
-            import mercurial
-        except ImportError:
-            raise nose.SkipTest('Hg is not installed')
-
-        account = HostingServiceAccount.objects.create(username='testuser',
-                                                       service_name='bitbucket')
+    def test_with_hosting_service_self_hosted_and_existing_account(self):
+        """Testing RepositoryForm with a self-hosted hosting service and existing account"""
+        account = HostingServiceAccount.objects.create(
+            username='testuser',
+            service_name='self_hosted_test',
+            hosting_url='https://example.com')
 
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'bitbucket',
+            'hosting_type': 'self_hosted_test',
+            'hosting_url': 'https://example.com',
             'hosting_account': account.pk,
-            'tool': Tool.objects.get(name='Mercurial').pk,
-            'bitbucket_repo_name': 'testrepo',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'myrepo',
+            'bug_tracker_type': 'none',
+        })
+        form.validate_repository = False
+
+        self.assertTrue(form.is_valid())
+
+        repository = form.save()
+        self.assertEqual(repository.name, 'test')
+        self.assertEqual(repository.hosting_account, account)
+        self.assertEqual(repository.extra_data['hosting_url'],
+                         'https://example.com')
+
+    def test_with_hosting_service_self_hosted_and_invalid_existing_account(self):
+        """Testing RepositoryForm with a self-hosted hosting service and invalid existing account"""
+        account = HostingServiceAccount.objects.create(
+            username='testuser',
+            service_name='self_hosted_test',
+            hosting_url='https://example1.com')
+
+        form = RepositoryForm({
+            'name': 'test',
+            'hosting_type': 'self_hosted_test',
+            'hosting_url': 'https://example2.com',
+            'hosting_account': account.pk,
+            'tool': self.git_tool_id,
+            'test_repo_name': 'myrepo',
+            'bug_tracker_type': 'none',
+        })
+        form.validate_repository = False
+
+        self.assertFalse(form.is_valid())
+
+    def test_with_hosting_service_custom_bug_tracker(self):
+        """Testing RepositoryForm with a custom bug tracker"""
+        account = HostingServiceAccount.objects.create(username='testuser',
+                                                       service_name='test')
+
+        form = RepositoryForm({
+            'name': 'test',
+            'hosting_type': 'test',
+            'hosting_account': account.pk,
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
             'bug_tracker_type': 'custom',
             'bug_tracker': 'http://example.com/issue/%s',
         })
@@ -1798,23 +2119,18 @@ class RepositoryFormTests(DjangoTestCase):
 
     def test_with_hosting_service_bug_tracker_service(self):
         """Testing RepositoryForm with a bug tracker service"""
-        try:
-            import mercurial
-        except ImportError:
-            raise nose.SkipTest('Hg is not installed')
-
         account = HostingServiceAccount.objects.create(username='testuser',
-                                                       service_name='bitbucket')
+                                                       service_name='test')
 
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'bitbucket',
+            'hosting_type': 'test',
             'hosting_account': account.pk,
-            'tool': Tool.objects.get(name='Mercurial').pk,
-            'bitbucket_repo_name': 'testrepo',
-            'bug_tracker_type': 'bitbucket',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
+            'bug_tracker_type': 'test',
             'bug_tracker_hosting_account_username': 'testuser',
-            'bug_tracker-bitbucket_repo_name': 'testrepo',
+            'bug_tracker-test_repo_name': 'testrepo',
         })
 
         self.assertTrue(form.is_valid())
@@ -1822,32 +2138,62 @@ class RepositoryFormTests(DjangoTestCase):
         repository = form.save()
         self.assertFalse(repository.extra_data['bug_tracker_use_hosting'])
         self.assertEqual(repository.bug_tracker,
-                         'http://bitbucket.org/testuser/testrepo/issue/%s/')
+                         'http://example.com/testuser/testrepo/issue/%s')
         self.assertEqual(repository.extra_data['bug_tracker_type'],
-                         'bitbucket')
+                         'test')
         self.assertEqual(
-            repository.extra_data['bug_tracker-bitbucket_repo_name'],
+            repository.extra_data['bug_tracker-test_repo_name'],
             'testrepo')
         self.assertEqual(
             repository.extra_data['bug_tracker-hosting_account_username'],
             'testuser')
 
-    def test_with_hosting_service_with_hosting_bug_tracker(self):
-        """Testing RepositoryForm with hosting service's bug tracker"""
-        account = HostingServiceAccount.objects.create(username='testuser',
-                                                       service_name='github')
-        account.data['authorization'] = {
-            'token': '1234',
-        }
-        account.save()
+    def test_with_hosting_service_self_hosted_bug_tracker_service(self):
+        """Testing RepositoryForm with a self-hosted bug tracker service"""
+        account = HostingServiceAccount.objects.create(
+            username='testuser',
+            service_name='self_hosted_test',
+            hosting_url='https://example.com')
 
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'github',
+            'hosting_type': 'self_hosted_test',
+            'hosting_url': 'https://example.com',
             'hosting_account': account.pk,
-            'tool': Tool.objects.get(name='Git').pk,
-            'repository_plan': 'public',
-            'github_public_repo_name': 'testrepo',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
+            'bug_tracker_type': 'self_hosted_test',
+            'bug_tracker_hosting_url': 'https://example.com',
+            'bug_tracker-test_repo_name': 'testrepo',
+        })
+        form.validate_repository = False
+
+        self.assertTrue(form.is_valid())
+
+        repository = form.save()
+        self.assertFalse(repository.extra_data['bug_tracker_use_hosting'])
+        self.assertEqual(repository.bug_tracker,
+                         'https://example.com/testrepo/issue/%s')
+        self.assertEqual(repository.extra_data['bug_tracker_type'],
+                         'self_hosted_test')
+        self.assertEqual(
+            repository.extra_data['bug_tracker-test_repo_name'],
+            'testrepo')
+        self.assertEqual(
+            repository.extra_data['bug_tracker_hosting_url'],
+            'https://example.com')
+
+    def test_with_hosting_service_with_hosting_bug_tracker(self):
+        """Testing RepositoryForm with hosting service's bug tracker"""
+        account = HostingServiceAccount.objects.create(username='testuser',
+                                                       service_name='test')
+
+        form = RepositoryForm({
+            'name': 'test',
+            'hosting_type': 'test',
+            'hosting_account': account.pk,
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
             'bug_tracker_use_hosting': True,
             'bug_tracker_type': 'googlecode',
         })
@@ -1858,29 +2204,60 @@ class RepositoryFormTests(DjangoTestCase):
         repository = form.save()
         self.assertTrue(repository.extra_data['bug_tracker_use_hosting'])
         self.assertEqual(repository.bug_tracker,
-                         'http://github.com/testuser/testrepo/issues#issue/%s')
+                         'http://example.com/testuser/testrepo/issue/%s')
         self.assertFalse('bug_tracker_type' in repository.extra_data)
-        self.assertFalse('bug_tracker-github_public_repo_name'
+        self.assertFalse('bug_tracker-test_repo_name'
                          in repository.extra_data)
         self.assertFalse('bug_tracker-hosting_account_username'
                          in repository.extra_data)
 
-    def test_with_hosting_service_no_bug_tracker(self):
-        """Testing RepositoryForm with no bug tracker"""
-        try:
-            import mercurial
-        except ImportError:
-            raise nose.SkipTest('Hg is not installed')
+    def test_with_hosting_service_with_hosting_bug_tracker_and_self_hosted(self):
+        """Testing RepositoryForm with self-hosted hosting service's bug tracker"""
+        account = HostingServiceAccount.objects.create(
+            username='testuser',
+            service_name='self_hosted_test',
+            hosting_url='https://example.com')
 
-        account = HostingServiceAccount.objects.create(username='testuser',
-                                                       service_name='bitbucket')
+        account.data['authorization'] = {
+            'token': '1234',
+        }
+        account.save()
 
         form = RepositoryForm({
             'name': 'test',
-            'hosting_type': 'bitbucket',
+            'hosting_type': 'self_hosted_test',
+            'hosting_url': 'https://example.com',
             'hosting_account': account.pk,
-            'tool': Tool.objects.get(name='Mercurial').pk,
-            'bitbucket_repo_name': 'testrepo',
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
+            'bug_tracker_use_hosting': True,
+            'bug_tracker_type': 'googlecode',
+        })
+        form.validate_repository = False
+
+        self.assertTrue(form.is_valid())
+
+        repository = form.save()
+        self.assertTrue(repository.extra_data['bug_tracker_use_hosting'])
+        self.assertEqual(repository.bug_tracker,
+                         'https://example.com/testrepo/issue/%s')
+        self.assertFalse('bug_tracker_type' in repository.extra_data)
+        self.assertFalse('bug_tracker-test_repo_name'
+                         in repository.extra_data)
+        self.assertFalse('bug_tracker_hosting_url'
+                         in repository.extra_data)
+
+    def test_with_hosting_service_no_bug_tracker(self):
+        """Testing RepositoryForm with no bug tracker"""
+        account = HostingServiceAccount.objects.create(username='testuser',
+                                                       service_name='test')
+
+        form = RepositoryForm({
+            'name': 'test',
+            'hosting_type': 'test',
+            'hosting_account': account.pk,
+            'tool': self.git_tool_id,
+            'test_repo_name': 'testrepo',
             'bug_tracker_type': 'none',
         })
 
@@ -1905,33 +2282,33 @@ class RepositoryFormTests(DjangoTestCase):
     def test_with_hosting_service_with_existing_bug_tracker_service(self):
         """Testing RepositoryForm with existing bug tracker service"""
         repository = Repository(name='test')
-        repository.extra_data['bug_tracker_type'] = 'bitbucket'
-        repository.extra_data['bug_tracker-bitbucket_repo_name'] = 'testrepo'
+        repository.extra_data['bug_tracker_type'] = 'test'
+        repository.extra_data['bug_tracker-test_repo_name'] = 'testrepo'
         repository.extra_data['bug_tracker-hosting_account_username'] = \
             'testuser'
 
         form = RepositoryForm(instance=repository)
         self.assertFalse(form._get_field_data('bug_tracker_use_hosting'))
-        self.assertEqual(form._get_field_data('bug_tracker_type'), 'bitbucket')
+        self.assertEqual(form._get_field_data('bug_tracker_type'), 'test')
         self.assertEqual(
             form._get_field_data('bug_tracker_hosting_account_username'),
             'testuser')
 
-        self.assertTrue('bitbucket' in form.bug_tracker_forms)
-        self.assertTrue('default' in form.bug_tracker_forms['bitbucket'])
-        bitbucket_form = form.bug_tracker_forms['bitbucket']['default']
+        self.assertTrue('test' in form.bug_tracker_forms)
+        self.assertTrue('default' in form.bug_tracker_forms['test'])
+        bitbucket_form = form.bug_tracker_forms['test']['default']
         self.assertEqual(
-            bitbucket_form.fields['bitbucket_repo_name'].initial,
+            bitbucket_form.fields['test_repo_name'].initial,
             'testrepo')
 
     def test_with_hosting_service_with_existing_bug_tracker_using_hosting(self):
         """Testing RepositoryForm with existing bug tracker using hosting service"""
         account = HostingServiceAccount.objects.create(username='testuser',
-                                                       service_name='bitbucket')
+                                                       service_name='test')
         repository = Repository(name='test',
                                 hosting_account=account)
         repository.extra_data['bug_tracker_use_hosting'] = True
-        repository.extra_data['bitbucket_repo_name'] = 'testrepo'
+        repository.extra_data['test_repo_name'] = 'testrepo'
 
         form = RepositoryForm(instance=repository)
         self.assertTrue(form._get_field_data('bug_tracker_use_hosting'))

@@ -12,6 +12,7 @@ from reviewboard.diffviewer.parser import DiffParser, DiffParserError
 from reviewboard.scmtools.git import GitDiffParser
 from reviewboard.scmtools.core import \
     FileNotFoundError, SCMClient, SCMTool, HEAD, PRE_CREATION, UNKNOWN
+from reviewboard.scmtools.errors import RepositoryNotFoundError
 
 
 class HgTool(SCMTool):
@@ -31,7 +32,6 @@ class HgTool(SCMTool):
             self.client = HgClient(repository.path, repository.local_site)
 
         self.uses_atomic_revisions = True
-        self.diff_uses_changeset_ids = True
 
     def get_file(self, path, revision=HEAD):
         return self.client.cat_file(path, str(revision))
@@ -55,6 +55,19 @@ class HgTool(SCMTool):
             return GitDiffParser(data)
         else:
             return HgDiffParser(data)
+
+    @classmethod
+    def check_repository(cls, path, username=None, password=None,
+                         local_site_name=None):
+        """Performs checks on a repository to test its validity."""
+        super(HgTool, cls).check_repository(path, username, password,
+                                            local_site_name)
+
+        # Create a client. This will fail if the repository doesn't exist.
+        if path.startswith('http'):
+            HgWebClient(path, username, password)
+        else:
+            HgClient(path, local_site_name)
 
 
 class HgDiffParser(DiffParser):
@@ -157,6 +170,9 @@ class HgDiffParser(DiffParser):
 
         return linenum
 
+    def get_orig_commit_id(self):
+        return self.origChangesetId
+
     def _check_file_diff_start(self, linenum, info):
         if linenum + 1 < len(self.lines) and \
            (self.lines[linenum].startswith('--- ') and \
@@ -209,7 +225,7 @@ class HgWebClient(SCMClient):
 
 class HgClient(object):
     def __init__(self, repoPath, local_site):
-        from mercurial import hg, ui
+        from mercurial import hg, ui, error
 
         # We've encountered problems getting the Mercurial version number.
         # Originally, we imported 'version' from mercurial.__version__,
@@ -253,7 +269,12 @@ class HgClient(object):
         else:
             logging.debug('Found configured ssh for mercurial: %s' % hg_ssh)
 
-        self.repo = hg.repository(hg_ui, path=repoPath)
+        try:
+            self.repo = hg.repository(hg_ui, path=repoPath)
+        except error.RepoError, e:
+            logging.error('Error connecting to Mercurial repository %s: %s'
+                          % (repoPath, e))
+            raise RepositoryNotFoundError
 
     def cat_file(self, path, rev="tip"):
         if rev == HEAD:
@@ -266,4 +287,4 @@ class HgClient(object):
         except Exception, e:
             # LookupError moves from repo to revlog in hg v0.9.4, so we
             # catch the more general Exception to avoid the dependency.
-            raise FileNotFoundError(path, rev, str(e))
+            raise FileNotFoundError(path, rev, detail=str(e))
